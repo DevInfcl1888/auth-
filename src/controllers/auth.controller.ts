@@ -32,7 +32,7 @@ import crypto from 'crypto';
 
 
 export const register = async (req: Request, res: Response): Promise<void> => {
-  const {
+ let {
     first_name,
     middle_name,
     last_name,
@@ -55,6 +55,8 @@ export const register = async (req: Request, res: Response): Promise<void> => {
     referral_code,
   } = req.body;
 
+    email = email?.trim().toLowerCase();
+    
   // Basic validation
   if (!email || !password || !gender || !first_name || !last_name) {
     res.status(400).json({ error: 'Missing required fields' });
@@ -250,88 +252,166 @@ export const register = async (req: Request, res: Response): Promise<void> => {
 
 const MAX_SESSIONS = 5;
 const SESSION_PREFIX = 'user_session:'; // Redis key prefix for sessions
-
-export const login = async (req: Request, res: Response): Promise<void> => {
-  const { email, password } = req.body;
-
+const commonLogin = async (
+  res: Response,
+  identifierField: 'email' | 'phone_num' | 'mdr_id',
+  identifierValue: string,
+  password: string
+): Promise<void> => {
   try {
-    // 1. Fetch user from Postgres (password still stored there)
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const query = `SELECT * FROM users WHERE ${identifierField} = $1`;
+    const result = await pool.query(query, [identifierValue]);
     const user = result.rows[0];
 
     if (!user) {
-      res.status(401).json({ error: 'Invalid email' });
+      res.status(401).json({ error: `Invalid ${identifierField}` });
       return;
     }
 
-    // 2. Verify password with stored salt & hash
-    const [storedSalt, storedHash] = user.password.split(':');
-    const computedHash = crypto.pbkdf2Sync(password, storedSalt, 1000, 64, 'sha512').toString('hex');
+    // ✅ Use correct salt & password (since they are stored in separate columns)
+    const storedSalt = user.salt;
+    const storedHash = user.password;
+    const computedHash = crypto
+      .pbkdf2Sync(password, storedSalt, 1000, 64, 'sha512')
+      .toString('hex');
+
     if (computedHash !== storedHash) {
       res.status(401).json({ error: 'Invalid password' });
       return;
     }
 
-    // 3. Check active sessions count in Redis
-    const userSessionKeys = await redisClient.keys(`${SESSION_PREFIX}${user.id}:*`);
-    if (userSessionKeys.length >= MAX_SESSIONS) {
-      res.status(403).json({ error: `Maximum active sessions reached (${MAX_SESSIONS})` });
+    // ✅ Handle max session logic, JWT etc.
+    const sessionKeys = await redisClient.keys(`${SESSION_PREFIX}${user.id}:*`);
+    if (sessionKeys.length >= MAX_SESSIONS) {
+      res.status(403).json({ error: `Max sessions (${MAX_SESSIONS}) reached` });
       return;
     }
 
-    // 4. Create new sessionId, tokens
     const sessionId = uuidv4();
     const accessToken = generateToken(user.id, sessionId, process.env.ACCESS_TOKEN_SECRET!, '15m');
     const refreshToken = generateToken(user.id, sessionId, process.env.REFRESH_TOKEN_SECRET!, '7d');
-
-    // 5. Store session info in Redis with TTL = 7 days (refresh token expiry)
     const redisKey = `${SESSION_PREFIX}${user.id}:${sessionId}`;
     await redisClient.set(redisKey, refreshToken, { EX: 7 * 24 * 60 * 60 });
 
-    // 6. Return tokens
     res.json({ accessToken, refreshToken });
   } catch (err) {
     res.status(500).json({ error: 'Login failed', detail: (err as Error).message });
   }
 };
 
-export const refreshToken = async (req: Request, res: Response): Promise<void> => {
-  const token = req.body.refreshToken || req.cookies?.refreshToken;
+export const loginWithEmail = async (req: Request, res: Response): Promise<void> => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    res.status(400).json({ error: 'Email & password required' });
+    return; // ✅ add this
+  }
 
-  if (!token) {
-    res.status(401).json({ error: 'Refresh token required' });
+  await commonLogin(res, 'email', email.toLowerCase(), password); // ✅ no need to return value
+};
+
+export const loginWithPhone = async (req: Request, res: Response): Promise<void> => {
+  const { phone, password } = req.body;
+  if (!phone || !password) {
+    res.status(400).json({ error: 'Phone & password required' });
     return;
   }
 
-  try {
-    // Check blacklist
-    const isBlacklisted = await redisClient.get(`bl_token:${token}`);
-    if (isBlacklisted) {
-      res.status(403).json({ error: 'Token is blacklisted' });
-      return;
-    }
-
-    // Verify token & extract payload
-    const decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as JwtPayload;
-    const { userId, sessionId } = decoded;
-
-    // Validate session exists in Redis
-    const redisKey = `${SESSION_PREFIX}${userId}:${sessionId}`;
-    const storedRefreshToken = await redisClient.get(redisKey);
-
-    if (!storedRefreshToken || storedRefreshToken !== token) {
-      res.status(403).json({ error: 'Invalid refresh token or session expired' });
-      return;
-    }
-
-    // Generate new access token (no refresh token rotation here)
-    const newAccessToken = generateToken(userId, sessionId, process.env.ACCESS_TOKEN_SECRET!, '15m');
-
-    res.json({ accessToken: newAccessToken });
-  } catch (err) {
-    res.status(403).json({ error: 'Invalid refresh token', detail: (err as Error).message });
-  }
+  await commonLogin(res, 'phone_num', phone, password);
 };
+
+export const loginWithMdrId = async (req: Request, res: Response): Promise<void> => {
+  const { mdr_id, password } = req.body;
+  if (!mdr_id || !password) {
+    res.status(400).json({ error: 'MDR ID & password required' });
+    return;
+  }
+
+  await commonLogin(res, 'mdr_id', mdr_id, password);
+};
+
+
+
+// export const login = async (req: Request, res: Response): Promise<void> => {
+//   const { email, password } = req.body;
+
+//   try {
+//     // 1. Fetch user from Postgres (password still stored there)
+//     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+//     const user = result.rows[0];
+
+//     if (!user) {
+//       res.status(401).json({ error: 'Invalid email' });
+//       return;
+//     }
+
+//     // 2. Verify password with stored salt & hash
+//     const [storedSalt, storedHash] = user.password.split(':');
+//     const computedHash = crypto.pbkdf2Sync(password, storedSalt, 1000, 64, 'sha512').toString('hex');
+//     if (computedHash !== storedHash) {
+//       res.status(401).json({ error: 'Invalid password' });
+//       return;
+//     }
+
+//     // 3. Check active sessions count in Redis
+//     const userSessionKeys = await redisClient.keys(`${SESSION_PREFIX}${user.id}:*`);
+//     if (userSessionKeys.length >= MAX_SESSIONS) {
+//       res.status(403).json({ error: `Maximum active sessions reached (${MAX_SESSIONS})` });
+//       return;
+//     }
+
+//     // 4. Create new sessionId, tokens
+//     const sessionId = uuidv4();
+//     const accessToken = generateToken(user.id, sessionId, process.env.ACCESS_TOKEN_SECRET!, '15m');
+//     const refreshToken = generateToken(user.id, sessionId, process.env.REFRESH_TOKEN_SECRET!, '7d');
+
+//     // 5. Store session info in Redis with TTL = 7 days (refresh token expiry)
+//     const redisKey = `${SESSION_PREFIX}${user.id}:${sessionId}`;
+//     await redisClient.set(redisKey, refreshToken, { EX: 7 * 24 * 60 * 60 });
+
+//     // 6. Return tokens
+//     res.json({ accessToken, refreshToken });
+//   } catch (err) {
+//     res.status(500).json({ error: 'Login failed', detail: (err as Error).message });
+//   }
+// };
+
+// export const refreshToken = async (req: Request, res: Response): Promise<void> => {
+//   const token = req.body.refreshToken || req.cookies?.refreshToken;
+
+//   if (!token) {
+//     res.status(401).json({ error: 'Refresh token required' });
+//     return;
+//   }
+
+//   try {
+//     // Check blacklist
+//     const isBlacklisted = await redisClient.get(`bl_token:${token}`);
+//     if (isBlacklisted) {
+//       res.status(403).json({ error: 'Token is blacklisted' });
+//       return;
+//     }
+
+//     // Verify token & extract payload
+//     const decoded = jwt.verify(token, process.env.REFRESH_TOKEN_SECRET!) as JwtPayload;
+//     const { userId, sessionId } = decoded;
+
+//     // Validate session exists in Redis
+//     const redisKey = `${SESSION_PREFIX}${userId}:${sessionId}`;
+//     const storedRefreshToken = await redisClient.get(redisKey);
+
+//     if (!storedRefreshToken || storedRefreshToken !== token) {
+//       res.status(403).json({ error: 'Invalid refresh token or session expired' });
+//       return;
+//     }
+
+//     // Generate new access token (no refresh token rotation here)
+//     const newAccessToken = generateToken(userId, sessionId, process.env.ACCESS_TOKEN_SECRET!, '15m');
+
+//     res.json({ accessToken: newAccessToken });
+//   } catch (err) {
+//     res.status(403).json({ error: 'Invalid refresh token', detail: (err as Error).message });
+//   }
+// };
 
 export const logout = async (req: Request, res: Response): Promise<void> => {
   const token = req.body.refreshToken || req.cookies?.refreshToken;
@@ -394,6 +474,7 @@ export const resetPassword = async (req: Request, res: Response) => {
     res.status(500).json({ error: 'Reset failed' });
   }
 };
+
 
 export const getProfile = async (req: Request, res: Response): Promise<void> => {
     const userId = (req as any).userId;

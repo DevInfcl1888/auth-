@@ -2,7 +2,9 @@ import express from "express";
 import passport from "passport";
 import {
   register,
-  login,
+  loginWithEmail,
+   loginWithPhone,
+  loginWithMdrId,
   logout,
   resetPassword,
   getProfile,
@@ -12,7 +14,10 @@ import { authenticateToken } from "../middlewares/auth.middleware";
 const router = express.Router();
 
 router.post("/register", register);
-router.post("/login", login);
+router.post('/login/email', loginWithEmail);
+router.post('/login/phone',loginWithPhone);
+router.post('/login/mdrId',loginWithMdrId)
+// router.post("/login", login);
 router.post("/logout", logout);
 router.post("/reset-password", resetPassword);
 router.get("/profile", authenticateToken, getProfile);

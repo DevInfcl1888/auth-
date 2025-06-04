@@ -2,6 +2,7 @@ import express, { Application } from 'express';
 import passport from 'passport';
 import dotenv from 'dotenv';
 import authRoutes from './routes/auth.routes';
+import passwordRoutes from './routes/password.routes';
 import session from 'express-session';
 import './passport';
 
@@ -26,7 +27,8 @@ app.use(passport.initialize());
 app.use(passport.session());
 console.log('typeof authRoutes:', typeof authRoutes);
 // ✅ Routes
-app.use('/api', authRoutes); // using only once is sufficient
+app.use('/api/', authRoutes); 
+app.use('/api/password', passwordRoutes);// using only once is sufficient
 
 // ✅ Server
 const PORT = process.env.PORT || 3000;
